@@ -39,7 +39,7 @@ int main() {
     }
 
     auto num_bits = static_cast<Word16>(bitrate / 50);
-    std::vector<Word16> bytes(num_bits / 16);
+    std::vector<UWord16> bytes(num_bits + 15 / 16, 0);
 
     encoder_init(&coder, num_bits);
 
@@ -53,13 +53,14 @@ int main() {
         G192_HEADER[0] = G192_SYNC_GOOD_FRAME;
         G192_HEADER[1] = (UWord16) num_bits;
 
+        std::fill(bytes.begin(), bytes.end(), 0);
         for (int i = 0; i < num_bits; ++i) {
-            auto current_bit = bitstream[i] == G192_BIT0 ? 0 : 1;
-            bytes[i / 16] |= (current_bit << (i % 16));
+            if (bitstream[i] == G192_BIT1)
+                bytes[i / 16] |= (1U << (i % 16));
         }
 
-        fout.write(reinterpret_cast<char*>(G192_HEADER), 2 * sizeof(UWord16));
-        fout.write(reinterpret_cast<char*>(bytes.data()), num_bits / 16 * sizeof(Word16));
+        fout.write(reinterpret_cast<char*>(G192_HEADER), sizeof(G192_HEADER));
+        fout.write(reinterpret_cast<char*>(bytes.data()), num_bits / 16 * sizeof(UWord16));
 
     } while (samples == FRAME_LENGTH);
 
@@ -78,6 +79,7 @@ int main() {
 
     Word16 bfi;
     Word16 dec_out[FRAME_LENGTH];
+    int frame = 0;
 
     while (read_bitstream(fin, bitstream, &num_bits, &bfi)) {
         if (!bfi) {
@@ -88,7 +90,9 @@ int main() {
 
         decode_frame(bitstream, bfi, dec_out, &decoder);
 
-        fout.write(reinterpret_cast<char*>(dec_out), FRAME_LENGTH * sizeof(Word16));
+        if (++frame != 1) {
+            fout.write(reinterpret_cast<char*>(dec_out), FRAME_LENGTH * sizeof(Word16));
+        }
     }
 
     return 0;
@@ -120,53 +124,42 @@ static Word16 read_bitstream(std::ifstream &infile,
                              Word16 *bfi)
 {
     UWord16   G192_SYNC_WORD;
-    Word16    result;
     Word16    bytes[FRAME_LENGTH];
 
     infile.read(reinterpret_cast<char*>(&G192_SYNC_WORD), sizeof(UWord16));
     if (infile.gcount() != sizeof(UWord16))
+        return 0;
+
+    if((G192_SYNC_WORD != G192_SYNC_GOOD_FRAME) && (G192_SYNC_WORD != G192_SYNC_BAD_FRAME))
     {
-        result = 0;
-    }
-    else {
-        if((G192_SYNC_WORD != G192_SYNC_GOOD_FRAME) && (G192_SYNC_WORD != G192_SYNC_BAD_FRAME))
-        {
-            fprintf(stderr, "\n Invalid bitstream. Wrong G192_SYNC_WORD ");
-            exit(EXIT_FAILURE);
-        }
-        else {
-            if(G192_SYNC_WORD == G192_SYNC_BAD_FRAME) {
-                *bfi = 1;
-            }
-            else {
-                *bfi = 0;
-            }
-
-            infile.read(reinterpret_cast<char*>(num_bits), sizeof(Word16));
-            if(infile.gcount() != sizeof(Word16)) {
-                fprintf(stderr, "\n Premature end of file, cannot read frame length  ");
-                exit(EXIT_FAILURE);
-            }
-
-            if(*num_bits > MAX_BITS_PER_FRAME) {
-                fprintf(stderr, "\n Frame is too large  ");
-                exit(EXIT_FAILURE);
-            }
-
-            infile.read(reinterpret_cast<char*>(bytes), *num_bits / 16 * sizeof(Word16));
-            if(infile.gcount() != (UWord16)*num_bits / 16 * sizeof(Word16))
-            {
-                fprintf(stderr, "\n Premature end of file, cannot read frame");
-                exit(EXIT_FAILURE);
-            }
-            else {
-                for (int i = 0; i < *num_bits; i++) {
-                    bitstream[i] = ((bytes[i / 16] >> (i & 15)) & 1) ? G192_BIT1 : G192_BIT0;
-                }
-            }
-        }
-        result = 1;
+        fprintf(stderr, "\n Invalid bitstream. Wrong G192_SYNC_WORD ");
+        exit(EXIT_FAILURE);
     }
 
-    return(result);
+    *bfi = (G192_SYNC_WORD == G192_SYNC_GOOD_FRAME) ? 0 : 1;
+
+    infile.read(reinterpret_cast<char*>(num_bits), sizeof(Word16));
+    if(infile.gcount() != sizeof(Word16)) {
+        fprintf(stderr, "\n Premature end of file, cannot read frame length  ");
+        exit(EXIT_FAILURE);
+    }
+
+    if(*num_bits > MAX_BITS_PER_FRAME) {
+        fprintf(stderr, "\n Frame is too large  ");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t words_to_read = (*num_bits) / 16;
+    infile.read(reinterpret_cast<char*>(bytes), words_to_read * sizeof(Word16));
+    if(infile.gcount() != words_to_read * sizeof(Word16))
+    {
+        fprintf(stderr, "\n Premature end of file, cannot read frame");
+        exit(0);
+    }
+
+    for (int i = 0; i < *num_bits; i++) {
+        bitstream[i] = (bytes[i / 16] & (1 << (i & 15))) ? G192_BIT1 : G192_BIT0;
+    }
+
+    return 1;
 }
